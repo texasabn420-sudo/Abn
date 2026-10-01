@@ -28,21 +28,25 @@ local Config = {
     AutoCollect = {
         TickRate = 0.4,
     },
+    UI = {
+        ThemeIndex = 1,
+    },
 }
 
-local Runtime = {
-    connections = {},
-    loops = {},
+local State = {
     noClipParts = {},
     playerESPObjects = {},
     playerConnections = {},
-    billboardPrompts = {},
+    basePromptEsp = {},
     originalHoldDurations = {},
     savedPositions = { [1] = nil, [2] = nil, [3] = nil },
     selectedSlots = {},
     automationButtons = {},
     categoryButtons = {},
+    loops = {},
+    connections = {},
     lastAttackTime = 0,
+    currentTarget = "[Closest Player]",
 }
 
 local toggles = {
@@ -66,16 +70,14 @@ local MONEY_TARGETS = {
     ["drop"] = true, ["crystal"] = true, ["crystals"] = true,
 }
 
+local physicsAttachment = nil
+local physicsVelocityConstraint = nil
+
 local themes = {
     { Background = Color3.fromRGB(46, 46, 46), TitleBar = Color3.fromRGB(36, 36, 36), Border = Color3.fromRGB(60, 60, 60), ButtonText = Color3.fromRGB(220, 220, 220) },
     { Background = Color3.fromRGB(15, 25, 45), TitleBar = Color3.fromRGB(10, 15, 30), Border = Color3.fromRGB(30, 50, 90), ButtonText = Color3.fromRGB(140, 200, 255) },
     { Background = Color3.fromRGB(10, 20, 10), TitleBar = Color3.fromRGB(5, 10, 5), Border = Color3.fromRGB(0, 255, 0), ButtonText = Color3.fromRGB(0, 255, 0) },
 }
-local currentThemeIndex = 1
-
-local physicsAttachment = nil
-local physicsVelocityConstraint = nil
-local selectedTargetName = "[Closest Player]"
 
 local function GetCharacter()
     return player.Character
@@ -92,6 +94,18 @@ local function safeDisconnect(connection)
                 connection:Disconnect()
             end
         end)
+    end
+end
+
+local function SetNoClip(enabled)
+    Config.Movement.NoClip = enabled
+    if not enabled then
+        for part, original in pairs(State.noClipParts) do
+            if part and part.Parent then
+                part.CanCollide = original
+            end
+        end
+        table.clear(State.noClipParts)
     end
 end
 
@@ -196,9 +210,9 @@ gui.Parent = targetParent
 local frame = Instance.new("Frame")
 frame.Size = UDim2.new(0, 230, 0, 320)
 frame.Position = UDim2.new(0.5, -115, 0.5, -160)
-frame.BackgroundColor3 = themes[currentThemeIndex].Background
+frame.BackgroundColor3 = themes[Config.UI.ThemeIndex].Background
 frame.BorderSizePixel = 1
-frame.BorderColor3 = themes[currentThemeIndex].Border
+frame.BorderColor3 = themes[Config.UI.ThemeIndex].Border
 frame.Active = true
 frame.Parent = gui
 
@@ -236,9 +250,9 @@ end)
 
 local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, 0, 0, 30)
-title.BackgroundColor3 = themes[currentThemeIndex].TitleBar
+title.BackgroundColor3 = themes[Config.UI.ThemeIndex].TitleBar
 title.Text = "Mod Menu"
-title.TextColor3 = themes[currentThemeIndex].ButtonText
+title.TextColor3 = themes[Config.UI.ThemeIndex].ButtonText
 title.TextSize = 18
 title.Font = Enum.Font.SourceSansBold
 title.Parent = frame
@@ -306,14 +320,14 @@ local function createCategory(name)
 
     local catButton = Instance.new("TextButton")
     catButton.Size = UDim2.new(1, 0, 0, 30)
-    catButton.BackgroundColor3 = themes[currentThemeIndex].TitleBar
+    catButton.BackgroundColor3 = themes[Config.UI.ThemeIndex].TitleBar
     catButton.Text = name .. " ▼"
-    catButton.TextColor3 = themes[currentThemeIndex].ButtonText
+    catButton.TextColor3 = themes[Config.UI.ThemeIndex].ButtonText
     catButton.TextSize = 16
     catButton.Font = Enum.Font.SourceSansBold
     catButton.Parent = catFrame
 
-    table.insert(Runtime.categoryButtons, catButton)
+    table.insert(State.categoryButtons, catButton)
 
     local subFrame = Instance.new("Frame")
     subFrame.Parent = catFrame
@@ -343,7 +357,7 @@ local function createCategory(name)
         local button = Instance.new("TextButton")
         button.Size = UDim2.new(1, -10, 0, 35)
         button.Position = UDim2.new(0, 5, 0, 0)
-        button.BackgroundColor3 = themes[currentThemeIndex].Background
+        button.BackgroundColor3 = themes[Config.UI.ThemeIndex].Background
         button.Text = subName
         button.TextColor3 = Color3.fromRGB(255, 75, 75)
         button.TextSize = 14
@@ -368,13 +382,13 @@ local function createCategory(name)
 end
 
 local function applyTheme()
-    local theme = themes[currentThemeIndex]
+    local theme = themes[Config.UI.ThemeIndex]
     frame.BackgroundColor3 = theme.Background
     frame.BorderColor3 = theme.Border
     title.BackgroundColor3 = theme.TitleBar
     title.TextColor3 = theme.ButtonText
 
-    for _, catBtn in ipairs(Runtime.categoryButtons) do
+    for _, catBtn in ipairs(State.categoryButtons) do
         catBtn.BackgroundColor3 = theme.TitleBar
         catBtn.TextColor3 = theme.ButtonText
     end
@@ -387,33 +401,14 @@ local miscAddButton = createCategory("Misc")
 local automationCategory = createCategory("Automation")
 local settingsAddButton = createCategory("Settings")
 
-local function SetNoClip(Enabled)
-    Config.Movement.NoClip = Enabled
-    if not Enabled then
-        for Part, OriginalState in pairs(Runtime.noClipParts) do
-            if Part and Part.Parent then
-                Part.CanCollide = OriginalState
-            end
-        end
-        table.clear(Runtime.noClipParts)
+local speedValueWalk = 50
+
+local function resetWalkSpeed()
+    local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
+    if hum then
+        hum.WalkSpeed = toggles.speedBoost and speedValueWalk or 16
     end
 end
-
-Runtime.connections.noClipLoop = RunService.Stepped:Connect(function()
-    if not Config.Movement.NoClip then return end
-
-    local Character = GetCharacter()
-    if not Character then return end
-
-    for _, Object in ipairs(Character:GetDescendants()) do
-        if Object:IsA("BasePart") then
-            if Runtime.noClipParts[Object] == nil then
-                Runtime.noClipParts[Object] = Object.CanCollide
-            end
-            Object.CanCollide = false
-        end
-    end
-end)
 
 movementAddButton("NoClip", function(button, stroke)
     local newState = not Config.Movement.NoClip
@@ -421,7 +416,7 @@ movementAddButton("NoClip", function(button, stroke)
     setButtonState(button, stroke, newState)
 end)
 
-Runtime.connections.infiniteJump = UserInputService.JumpRequest:Connect(function()
+State.connections.infiniteJump = UserInputService.JumpRequest:Connect(function()
     if toggles.infiniteJump then
         local character = GetCharacter()
         local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -436,31 +431,26 @@ movementAddButton("Infinite Jump", function(button, stroke)
     setButtonState(button, stroke, toggles.infiniteJump)
 end)
 
-local SPEED_SLIDER_CONFIG = {
+local speedSliderConfig = {
     Walk = { min = 10, max = 500, default = 50, label = "Walk Speed" },
     CFrame = { min = 10, max = 500, default = 34, label = "Physics Speed" },
 }
 
-local speedValueWalk = SPEED_SLIDER_CONFIG.Walk.default
 local _, speedSubContainer = movementAddButton("Speed Boost", function(button, stroke)
     toggles.speedBoost = not toggles.speedBoost
     setButtonState(button, stroke, toggles.speedBoost)
-
-    local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
-    if hum then
-        hum.WalkSpeed = toggles.speedBoost and speedValueWalk or 16
-    end
+    resetWalkSpeed()
 end)
 
-createSpeedSlider(speedSubContainer, SPEED_SLIDER_CONFIG.Walk, function(value)
+createSpeedSlider(speedSubContainer, speedSliderConfig.Walk, function(value)
     speedValueWalk = value
-    local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
-    if hum and toggles.speedBoost then
-        hum.WalkSpeed = value
+    if toggles.speedBoost then
+        local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = value end
     end
 end)
 
-local _, movementSubContainer = movementAddButton("Speed Bypass (Physics)", function(button, stroke)
+local _, physicsSubContainer = movementAddButton("Speed Bypass (Physics)", function(button, stroke)
     toggles.speedBypassCFrame = not toggles.speedBypassCFrame
     setButtonState(button, stroke, toggles.speedBypassCFrame)
 
@@ -468,11 +458,11 @@ local _, movementSubContainer = movementAddButton("Speed Bypass (Physics)", func
         local root = GetRoot(GetCharacter())
         SetupPhysicsObjects(root)
 
-        if Runtime.connections.speedCFrame then
-            Runtime.connections.speedCFrame:Disconnect()
+        if State.connections.speedCFrame then
+            State.connections.speedCFrame:Disconnect()
         end
 
-        Runtime.connections.speedCFrame = RunService.Heartbeat:Connect(function()
+        State.connections.speedCFrame = RunService.Heartbeat:Connect(function()
             local char = GetCharacter()
             local activeRoot = GetRoot(char)
             local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -488,9 +478,9 @@ local _, movementSubContainer = movementAddButton("Speed Bypass (Physics)", func
             end
         end)
     else
-        if Runtime.connections.speedCFrame then
-            Runtime.connections.speedCFrame:Disconnect()
-            Runtime.connections.speedCFrame = nil
+        if State.connections.speedCFrame then
+            State.connections.speedCFrame:Disconnect()
+            State.connections.speedCFrame = nil
         end
 
         if physicsVelocityConstraint then
@@ -499,118 +489,133 @@ local _, movementSubContainer = movementAddButton("Speed Bypass (Physics)", func
     end
 end)
 
-createSpeedSlider(movementSubContainer, SPEED_SLIDER_CONFIG.CFrame, function(value)
+createSpeedSlider(physicsSubContainer, speedSliderConfig.CFrame, function(value)
     Config.Movement.PhysicsSpeed = value
 end)
 
-player.CharacterAdded:Connect(function(char)
-    local root = char:WaitForChild("HumanoidRootPart", 5)
-    local hum = char:WaitForChild("Humanoid", 5)
+player.CharacterAdded:Connect(function(character)
+    local root = character:WaitForChild("HumanoidRootPart", 5)
+    local hum = character:WaitForChild("Humanoid", 5)
     if root then SetupPhysicsObjects(root) end
-
-    if hum and toggles.speedBoost then
-        hum.WalkSpeed = speedValueWalk
-    elseif hum then
-        hum.WalkSpeed = 16
+    if hum then
+        if toggles.speedBoost then
+            hum.WalkSpeed = speedValueWalk
+        else
+            hum.WalkSpeed = 16
+        end
     end
 end)
 
-local function RemovePlayerESP(Player)
-    local Data = Runtime.playerESPObjects[Player]
-    if Data then
-        if Data.LoopActive then Data.LoopActive = false end
+State.connections.noClipLoop = RunService.Stepped:Connect(function()
+    if not Config.Movement.NoClip then return end
+    local character = GetCharacter()
+    if not character then return end
 
-        for _, Object in pairs(Data) do
-            if typeof(Object) == "Instance" and Object.Parent then
-                pcall(function() Object:Destroy() end)
+    for _, object in ipairs(character:GetDescendants()) do
+        if object:IsA("BasePart") then
+            if State.noClipParts[object] == nil then
+                State.noClipParts[object] = object.CanCollide
             end
+            object.CanCollide = false
         end
-
-        Runtime.playerESPObjects[Player] = nil
     end
+end)
+
+local function RemovePlayerESP(playerTarget)
+    local data = State.playerESPObjects[playerTarget]
+    if not data then return end
+
+    if data.LoopActive then data.LoopActive = false end
+
+    for _, object in pairs(data) do
+        if typeof(object) == "Instance" and object.Parent then
+            pcall(function() object:Destroy() end)
+        end
+    end
+
+    State.playerESPObjects[playerTarget] = nil
 end
 
-local function CreatePlayerESP(Player)
-    if Player == player then return end
-    local Character = Player.Character
-    if not Character then return end
+local function CreatePlayerESP(playerTarget)
+    if playerTarget == player then return end
+    local character = playerTarget.Character
+    if not character then return end
 
-    RemovePlayerESP(Player)
+    RemovePlayerESP(playerTarget)
 
-    local Root = Character:FindFirstChild("HumanoidRootPart")
-    if not Root then return end
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
 
-    local Highlight = Instance.new("Highlight")
-    Highlight.Name = "CustomYellowHighlight"
-    Highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-    Highlight.FillColor = Color3.fromRGB(255, 255, 0)
-    Highlight.OutlineColor = Color3.fromRGB(255, 255, 0)
-    Highlight.FillTransparency = 0.25
-    Highlight.Enabled = Config.ESP.Players
-    Highlight.Parent = Character
+    local highlight = Instance.new("Highlight")
+    highlight.Name = "CustomYellowHighlight"
+    highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    highlight.FillColor = Color3.fromRGB(255, 255, 0)
+    highlight.OutlineColor = Color3.fromRGB(255, 255, 0)
+    highlight.FillTransparency = 0.25
+    highlight.Enabled = Config.ESP.Players
+    highlight.Parent = character
 
-    local Billboard = Instance.new("BillboardGui")
-    Billboard.Name = "CustomOrangeBillboard"
-    Billboard.Size = UDim2.fromOffset(200, 40)
-    Billboard.StudsOffset = Vector3.new(0, 4.0, 0)
-    Billboard.AlwaysOnTop = true
-    Billboard.Enabled = Config.ESP.Players
-    Billboard.Parent = Character
+    local billboard = Instance.new("BillboardGui")
+    billboard.Name = "CustomOrangeBillboard"
+    billboard.Size = UDim2.fromOffset(200, 40)
+    billboard.StudsOffset = Vector3.new(0, 4.0, 0)
+    billboard.AlwaysOnTop = true
+    billboard.Enabled = Config.ESP.Players
+    billboard.Parent = character
 
-    local Label = Instance.new("TextLabel")
-    Label.Size = UDim2.fromScale(1, 1)
-    Label.BackgroundTransparency = 1
-    Label.TextColor3 = Color3.fromRGB(255, 120, 0)
-    Label.TextStrokeColor3 = Color3.new(0, 0, 0)
-    Label.Font = Enum.Font.GothamBold
-    Label.TextScaled = true
-    Label.Parent = Billboard
+    local label = Instance.new("TextLabel")
+    label.Size = UDim2.fromScale(1, 1)
+    label.BackgroundTransparency = 1
+    label.TextColor3 = Color3.fromRGB(255, 120, 0)
+    label.TextStrokeColor3 = Color3.new(0, 0, 0)
+    label.Font = Enum.Font.GothamBold
+    label.TextScaled = true
+    label.Parent = billboard
 
-    local runtimeToken = { Highlight = Highlight, Billboard = Billboard, LoopActive = true }
-    Runtime.playerESPObjects[Player] = runtimeToken
+    local runtimeToken = { Highlight = highlight, Billboard = billboard, LoopActive = true }
+    State.playerESPObjects[playerTarget] = runtimeToken
 
     task.spawn(function()
-        while Character.Parent and Player.Parent and Runtime.playerESPObjects[Player] == runtimeToken and runtimeToken.LoopActive do
-            local currentConfigState = Config.ESP.Players
-            Highlight.Enabled = currentConfigState
-            Billboard.Enabled = currentConfigState
+        while character.Parent and playerTarget.Parent and State.playerESPObjects[playerTarget] == runtimeToken and runtimeToken.LoopActive do
+            local enabled = Config.ESP.Players
+            highlight.Enabled = enabled
+            billboard.Enabled = enabled
 
-            if currentConfigState and Root.Parent then
-                local MyCharacter = player.Character
-                local MyRoot = MyCharacter and MyCharacter:FindFirstChild("HumanoidRootPart")
-
-                if MyRoot then
-                    local Distance = math.floor((MyRoot.Position - Root.Position).Magnitude)
-                    Label.Text = string.format("👤 %s [%d studs]", Player.Name, Distance)
+            if enabled and root.Parent then
+                local myCharacter = player.Character
+                local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
+                if myRoot then
+                    local distance = math.floor((myRoot.Position - root.Position).Magnitude)
+                    label.Text = string.format("👤 %s [%d studs]", playerTarget.Name, distance)
                 else
-                    Label.Text = "👤 " .. Player.Name
+                    label.Text = "👤 " .. playerTarget.Name
                 end
             end
 
             task.wait(0.1)
         end
 
-        if Runtime.playerESPObjects[Player] == runtimeToken then
-            RemovePlayerESP(Player)
+        if State.playerESPObjects[playerTarget] == runtimeToken then
+            RemovePlayerESP(playerTarget)
         end
     end)
 end
 
-local function AttachPlayerESP(Player)
-    if Player == player then return end
+local function AttachPlayerESP(playerTarget)
+    if playerTarget == player then return end
 
-    if Runtime.playerConnections[Player] then
-        Runtime.playerConnections[Player]:Disconnect()
-        Runtime.playerConnections[Player] = nil
+    if State.playerConnections[playerTarget] then
+        State.playerConnections[playerTarget]:Disconnect()
+        State.playerConnections[playerTarget] = nil
     end
 
-    if Player.Character then
-        task.spawn(CreatePlayerESP, Player)
+    if playerTarget.Character then
+        task.spawn(CreatePlayerESP, playerTarget)
     end
 
-    Runtime.playerConnections[Player] = Player.CharacterAdded:Connect(function(char)
-        if char:WaitForChild("HumanoidRootPart", 5) then
-            CreatePlayerESP(Player)
+    State.playerConnections[playerTarget] = playerTarget.CharacterAdded:Connect(function(character)
+        if character:WaitForChild("HumanoidRootPart", 5) then
+            CreatePlayerESP(playerTarget)
         end
     end)
 end
@@ -619,12 +624,12 @@ for _, p in ipairs(Players:GetPlayers()) do
     AttachPlayerESP(p)
 end
 
-Runtime.connections.playerAddedESP = Players.PlayerAdded:Connect(AttachPlayerESP)
-Runtime.connections.playerRemovingESP = Players.PlayerRemoving:Connect(function(p)
+State.connections.playerAddedESP = Players.PlayerAdded:Connect(AttachPlayerESP)
+State.connections.playerRemovingESP = Players.PlayerRemoving:Connect(function(p)
     RemovePlayerESP(p)
-    if Runtime.playerConnections[p] then
-        Runtime.playerConnections[p]:Disconnect()
-        Runtime.playerConnections[p] = nil
+    if State.playerConnections[p] then
+        State.playerConnections[p]:Disconnect()
+        State.playerConnections[p] = nil
     end
 end)
 
@@ -677,16 +682,16 @@ local function ApplyBluePromptESP(part, playerUsername, espFolder)
 end
 
 local function StartPlayerBaseTracking()
-    if Runtime.loops.playerBase then return end
+    if State.loops.playerBase then return end
 
-    Runtime.loops.playerBase = task.spawn(function()
+    State.loops.playerBase = task.spawn(function()
         while Config.ESP.PlayerBases do
             local espFolder = getBluePromptESPFolder()
             local discoveredThisPass = {}
             local playerLookup = {}
 
             for _, p in ipairs(Players:GetPlayers()) do
-                if p ~= Players.LocalPlayer then
+                if p ~= player then
                     playerLookup[p.Name:lower()] = p.Name
                     playerLookup[tostring(p.UserId)] = p.Name
                 end
@@ -699,7 +704,7 @@ local function StartPlayerBaseTracking()
                     local fullNameLower = object:GetFullName():lower()
                     local isDoorPrompt = false
 
-                    for _, keyword in ipairs({"enter", "open", "door", "gate", "access", "lock", "house", "base"}) do
+                    for _, keyword in ipairs({ "enter", "open", "door", "gate", "access", "lock", "house", "base" }) do
                         if string.find(actionTextLower, keyword) or string.find(objectTextLower, keyword) then
                             isDoorPrompt = true
                             break
@@ -710,7 +715,7 @@ local function StartPlayerBaseTracking()
                         local targetPart = object.Parent
                         discoveredThisPass[targetPart] = true
 
-                        if not Runtime.billboardPrompts[targetPart] then
+                        if not State.basePromptEsp[targetPart] then
                             local matchedOwner = "Other Player"
                             local ownerFound = false
 
@@ -733,20 +738,18 @@ local function StartPlayerBaseTracking()
                                 end
                             end
 
-                            if not string.find(fullNameLower, Players.LocalPlayer.Name:lower()) then
-                                Runtime.billboardPrompts[targetPart] = ApplyBluePromptESP(targetPart, matchedOwner, espFolder)
+                            if not string.find(fullNameLower, player.Name:lower()) then
+                                State.basePromptEsp[targetPart] = ApplyBluePromptESP(targetPart, matchedOwner, espFolder)
                             end
                         end
                     end
                 end
             end
 
-            for savedPart, billboardInstance in pairs(Runtime.billboardPrompts) do
-                if not discoveredThisPass[savedPart] or not savedPart.Parent then
-                    if billboardInstance and billboardInstance.Parent then
-                        billboardInstance:Destroy()
-                    end
-                    Runtime.billboardPrompts[savedPart] = nil
+            for part, billboard in pairs(State.basePromptEsp) do
+                if not discoveredThisPass[part] or not part.Parent then
+                    if billboard and billboard.Parent then billboard:Destroy() end
+                    State.basePromptEsp[part] = nil
                 end
             end
 
@@ -756,16 +759,14 @@ local function StartPlayerBaseTracking()
 end
 
 local function StopPlayerBaseTracking()
-    if Runtime.loops.playerBase then
-        task.cancel(Runtime.loops.playerBase)
-        Runtime.loops.playerBase = nil
+    if State.loops.playerBase then
+        task.cancel(State.loops.playerBase)
+        State.loops.playerBase = nil
     end
 
-    table.clear(Runtime.billboardPrompts)
+    table.clear(State.basePromptEsp)
     local folder = CoreGui:FindFirstChild("BlueTextPromptESP")
-    if folder then
-        folder:Destroy()
-    end
+    if folder then folder:Destroy() end
 end
 
 visualsAddButton("Base ESP", function(button, stroke)
@@ -779,7 +780,7 @@ visualsAddButton("Base ESP", function(button, stroke)
     end
 end)
 
-Runtime.connections.hitboxLoop = RunService.Stepped:Connect(function()
+State.connections.hitboxLoop = RunService.Stepped:Connect(function()
     for _, otherPlayer in ipairs(Players:GetPlayers()) do
         if otherPlayer ~= player and otherPlayer.Character then
             local root = otherPlayer.Character:FindFirstChild("HumanoidRootPart")
@@ -807,7 +808,7 @@ local slotButtons = {}
 
 local function updateSlotUI(slot)
     if slotButtons[slot] then
-        if Runtime.savedPositions[slot] then
+        if State.savedPositions[slot] then
             slotButtons[slot].Save.Text = "Resave Slot " .. slot
             slotButtons[slot].TP.TextColor3 = Color3.fromRGB(75, 255, 75)
         else
@@ -846,15 +847,15 @@ local function createTeleportSlotUI(slot, parentFrame)
     saveBtn.MouseButton1Click:Connect(function()
         local root = GetRoot(GetCharacter())
         if root then
-            Runtime.savedPositions[slot] = root.CFrame
+            State.savedPositions[slot] = root.CFrame
             updateSlotUI(slot)
         end
     end)
 
     tpBtn.MouseButton1Click:Connect(function()
         local root = GetRoot(GetCharacter())
-        if root and Runtime.savedPositions[slot] then
-            root.CFrame = Runtime.savedPositions[slot]
+        if root and State.savedPositions[slot] then
+            root.CFrame = State.savedPositions[slot]
         end
     end)
 end
@@ -874,7 +875,7 @@ clearAllBtn.Font = Enum.Font.SourceSansBold
 clearAllBtn.Parent = tpSubContainer
 clearAllBtn.MouseButton1Click:Connect(function()
     for i = 1, 3 do
-        Runtime.savedPositions[i] = nil
+        State.savedPositions[i] = nil
         updateSlotUI(i)
     end
 end)
@@ -909,8 +910,8 @@ local function getClosestTarget()
 
     local closest, minDist = nil, math.huge
 
-    if selectedTargetName ~= "[Closest Player]" then
-        local targetPlayer = Players:FindFirstChild(selectedTargetName)
+    if State.currentTarget ~= "[Closest Player]" then
+        local targetPlayer = Players:FindFirstChild(State.currentTarget)
         if targetPlayer and targetPlayer.Character then
             local tRoot = targetPlayer.Character:FindFirstChild("HumanoidRootPart")
             local hum = targetPlayer.Character:FindFirstChildOfClass("Humanoid")
@@ -939,8 +940,8 @@ local function getClosestTarget()
 end
 
 local function startBatAimbot()
-    if Runtime.connections.aimbot then
-        Runtime.connections.aimbot:Disconnect()
+    if State.connections.aimbot then
+        State.connections.aimbot:Disconnect()
     end
 
     local char = GetCharacter()
@@ -948,35 +949,26 @@ local function startBatAimbot()
     SetupPhysicsObjects(root)
 
     local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum then
-        hum.AutoRotate = false
-    end
+    if hum then hum.AutoRotate = false end
 
-    Runtime.connections.aimbot = RunService.RenderStepped:Connect(function()
+    State.connections.aimbot = RunService.RenderStepped:Connect(function()
         if not toggles.autoBatToggled then return end
 
         local activeChar = GetCharacter()
         local activeRoot = GetRoot(activeChar)
         local activeHum = activeChar and activeChar:FindFirstChildOfClass("Humanoid")
-
-        if not activeRoot or not activeHum then
-            return
-        end
+        if not activeRoot or not activeHum then return end
 
         SetupPhysicsObjects(activeRoot)
 
         if not activeChar:FindFirstChildOfClass("Tool") then
             local bat = findBat()
-            if bat then
-                pcall(function() activeHum:EquipTool(bat) end)
-            end
+            if bat then pcall(function() activeHum:EquipTool(bat) end) end
         end
 
         local target = getClosestTarget()
         if not target or not target.Parent then
-            if physicsVelocityConstraint then
-                physicsVelocityConstraint.MaxForce = 0
-            end
+            if physicsVelocityConstraint then physicsVelocityConstraint.MaxForce = 0 end
             return
         end
 
@@ -1005,15 +997,14 @@ local function startBatAimbot()
         else
             local combatOffset = target.CFrame.LookVector * -1.5
             activeRoot.CFrame = CFrame.lookAt(targetPosition + combatOffset, Vector3.new(targetPosition.X, myPosition.Y, targetPosition.Z))
-
             if physicsVelocityConstraint then
                 physicsVelocityConstraint.MaxForce = 999999
                 physicsVelocityConstraint.VectorVelocity = Vector3.new(0, activeRoot.AssemblyLinearVelocity.Y, 0)
             end
         end
 
-        if distance < 11 and (tick() - Runtime.lastAttackTime) >= Config.Combat.AttackCooldown then
-            Runtime.lastAttackTime = tick()
+        if distance < 11 and (tick() - State.lastAttackTime) >= Config.Combat.AttackCooldown then
+            State.lastAttackTime = tick()
             local tool = activeChar:FindFirstChildOfClass("Tool")
             if tool then
                 local remote = tool:FindFirstChildOfClass("RemoteEvent") or tool:FindFirstChildWhichIsA("RemoteEvent", true)
@@ -1027,19 +1018,15 @@ local function startBatAimbot()
 end
 
 local function stopBatAimbot()
-    if Runtime.connections.aimbot then
-        Runtime.connections.aimbot:Disconnect()
-        Runtime.connections.aimbot = nil
+    if State.connections.aimbot then
+        State.connections.aimbot:Disconnect()
+        State.connections.aimbot = nil
     end
 
-    if physicsVelocityConstraint then
-        physicsVelocityConstraint.MaxForce = 0
-    end
+    if physicsVelocityConstraint then physicsVelocityConstraint.MaxForce = 0 end
 
     local hum = GetCharacter() and GetCharacter():FindFirstChildOfClass("Humanoid")
-    if hum then
-        hum.AutoRotate = true
-    end
+    if hum then hum.AutoRotate = true end
 end
 
 miscAddButton("BAT AIMBOT", function(button, stroke)
@@ -1054,8 +1041,8 @@ miscAddButton("BAT AIMBOT", function(button, stroke)
 end)
 
 local function applyPromptFix(prompt)
-    if prompt:IsA("ProximityPrompt") and not Runtime.originalHoldDurations[prompt] then
-        Runtime.originalHoldDurations[prompt] = prompt.HoldDuration
+    if prompt:IsA("ProximityPrompt") and not State.originalHoldDurations[prompt] then
+        State.originalHoldDurations[prompt] = prompt.HoldDuration
         if toggles.instantProximity then
             prompt.HoldDuration = 0
         end
@@ -1069,13 +1056,13 @@ miscAddButton("Toggle Instant Proximity", function(button, stroke)
     if toggles.instantProximity then
         for _, prompt in ipairs(Workspace:GetDescendants()) do
             applyPromptFix(prompt)
-            if Runtime.originalHoldDurations[prompt] then
+            if State.originalHoldDurations[prompt] then
                 prompt.HoldDuration = 0
             end
         end
 
-        if not Runtime.connections.instantPrompt then
-            Runtime.connections.instantPrompt = Workspace.DescendantAdded:Connect(function(descendant)
+        if not State.connections.instantPrompt then
+            State.connections.instantPrompt = Workspace.DescendantAdded:Connect(function(descendant)
                 task.spawn(function()
                     if descendant:IsA("ProximityPrompt") then
                         applyPromptFix(descendant)
@@ -1084,17 +1071,17 @@ miscAddButton("Toggle Instant Proximity", function(button, stroke)
             end)
         end
     else
-        if Runtime.connections.instantPrompt then
-            Runtime.connections.instantPrompt:Disconnect()
-            Runtime.connections.instantPrompt = nil
+        if State.connections.instantPrompt then
+            State.connections.instantPrompt:Disconnect()
+            State.connections.instantPrompt = nil
         end
 
-        for prompt, dur in pairs(Runtime.originalHoldDurations) do
+        for prompt, dur in pairs(State.originalHoldDurations) do
             if prompt and prompt.Parent then
                 prompt.HoldDuration = dur
             end
         end
-        table.clear(Runtime.originalHoldDurations)
+        table.clear(State.originalHoldDurations)
     end
 end)
 
@@ -1104,11 +1091,9 @@ miscAddButton("Radius Multi-Pickup", function(button, stroke)
     setButtonState(button, stroke, toggles.multiPrompt)
 
     if toggles.multiPrompt then
-        Runtime.loops.multiPrompt = task.spawn(function()
+        State.loops.multiPrompt = task.spawn(function()
             while toggles.multiPrompt do
-                local character = GetCharacter()
-                local rootPart = GetRoot(character)
-
+                local rootPart = GetRoot(GetCharacter())
                 if rootPart then
                     for _, descendant in ipairs(Workspace:GetDescendants()) do
                         if descendant:IsA("ProximityPrompt") and descendant.Parent and descendant.Parent:IsA("BasePart") then
@@ -1123,19 +1108,18 @@ miscAddButton("Radius Multi-Pickup", function(button, stroke)
                         end
                     end
                 end
-
                 task.wait(0.2)
             end
         end)
     else
-        if Runtime.loops.multiPrompt then
-            task.cancel(Runtime.loops.multiPrompt)
-            Runtime.loops.multiPrompt = nil
+        if State.loops.multiPrompt then
+            task.cancel(State.loops.multiPrompt)
+            State.loops.multiPrompt = nil
         end
     end
 end)
 
-Runtime.connections.afk = player.Idled:Connect(function()
+State.connections.afk = player.Idled:Connect(function()
     if toggles.antiAFK then
         local virtualUser = game:GetService("VirtualUser")
         virtualUser:CaptureController()
@@ -1149,8 +1133,8 @@ miscAddButton("Anti-AFK System", function(button, stroke)
 end)
 
 local function handlePickup(part)
-    local char = player.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local character = player.Character
+    local root = character and character:FindFirstChild("HumanoidRootPart")
     if root and part:IsA("BasePart") then
         if firetouchinterest then
             firetouchinterest(root, part, 0)
@@ -1170,10 +1154,11 @@ miscAddButton("Auto-Collect Currency", function(button, stroke)
     setButtonState(button, stroke, toggles.autoCollect)
 
     if toggles.autoCollect then
-        Runtime.loops.autoCollect = task.spawn(function()
+        State.loops.autoCollect = task.spawn(function()
             while toggles.autoCollect do
                 for _, object in ipairs(Workspace:GetDescendants()) do
                     if not toggles.autoCollect then break end
+
                     if object:IsA("BasePart") and object.Transparency < 1 then
                         local objectNameLower = string.lower(object.Name)
                         if MONEY_TARGETS[objectNameLower] or string.find(objectNameLower, "cash") or string.find(objectNameLower, "money") or string.find(objectNameLower, "coin") then
@@ -1181,13 +1166,14 @@ miscAddButton("Auto-Collect Currency", function(button, stroke)
                         end
                     end
                 end
+
                 task.wait(Config.AutoCollect.TickRate)
             end
         end)
     else
-        if Runtime.loops.autoCollect then
-            task.cancel(Runtime.loops.autoCollect)
-            Runtime.loops.autoCollect = nil
+        if State.loops.autoCollect then
+            task.cancel(State.loops.autoCollect)
+            State.loops.autoCollect = nil
         end
     end
 end)
@@ -1197,7 +1183,7 @@ local TOTAL_SLOTS = 30
 local COOLDOWN_RATE = 0.15
 
 for i = 1, TOTAL_SLOTS do
-    Runtime.selectedSlots[i] = true
+    State.selectedSlots[i] = true
 end
 
 local slotDropdownContainer = Instance.new("Frame")
@@ -1236,8 +1222,8 @@ slotDropdownLayout.SortOrder = Enum.SortOrder.LayoutOrder
 local function updateDropdownLabel()
     local selectedCount = 0
     for i = 1, TOTAL_SLOTS do
-        if Runtime.selectedSlots[i] then
-            selectedCount = selectedCount + 1
+        if State.selectedSlots[i] then
+            selectedCount += 1
         end
     end
 
@@ -1251,10 +1237,10 @@ local function updateDropdownLabel()
 end
 
 local function refreshSlotDropdownList()
-    for _, btn in ipairs(Runtime.automationButtons) do
+    for _, btn in ipairs(State.automationButtons) do
         btn:Destroy()
     end
-    table.clear(Runtime.automationButtons)
+    table.clear(State.automationButtons)
 
     for slotIndex = 1, TOTAL_SLOTS do
         local btn = Instance.new("TextButton")
@@ -1266,15 +1252,15 @@ local function refreshSlotDropdownList()
         btn.ZIndex = 16
         btn.LayoutOrder = slotIndex
         btn.Parent = slotDropdownListFrame
-        btn.TextColor3 = Runtime.selectedSlots[slotIndex] and Color3.fromRGB(75, 255, 75) or Color3.fromRGB(180, 75, 75)
+        btn.TextColor3 = State.selectedSlots[slotIndex] and Color3.fromRGB(75, 255, 75) or Color3.fromRGB(180, 75, 75)
 
         btn.MouseButton1Click:Connect(function()
-            Runtime.selectedSlots[slotIndex] = not Runtime.selectedSlots[slotIndex]
-            btn.TextColor3 = Runtime.selectedSlots[slotIndex] and Color3.fromRGB(75, 255, 75) or Color3.fromRGB(180, 75, 75)
+            State.selectedSlots[slotIndex] = not State.selectedSlots[slotIndex]
+            btn.TextColor3 = State.selectedSlots[slotIndex] and Color3.fromRGB(75, 255, 75) or Color3.fromRGB(180, 75, 75)
             updateDropdownLabel()
         end)
 
-        table.insert(Runtime.automationButtons, btn)
+        table.insert(State.automationButtons, btn)
     end
 
     slotDropdownListFrame.CanvasSize = UDim2.new(0, 0, 0, slotDropdownLayout.AbsoluteContentSize.Y)
@@ -1304,7 +1290,7 @@ automationCategory("Toggle Auto-Upgrade", function(button, stroke)
 
                 for slotIndex = 1, TOTAL_SLOTS do
                     if not isAutoUpgrading then break end
-                    if Runtime.selectedSlots[slotIndex] then
+                    if State.selectedSlots[slotIndex] then
                         attemptedAny = true
                         local success, response = upgradeRemote:InvokeServer(slotIndex)
                         local responseStr = string.lower(tostring(response))
@@ -1314,7 +1300,6 @@ automationCategory("Toggle Auto-Upgrade", function(button, stroke)
                         else
                             warn("Failed targeted Slot #" .. slotIndex .. " | Response: " .. tostring(response))
                             if string.find(responseStr, "money") or string.find(responseStr, "cash") or string.find(responseStr, "fund") or string.find(responseStr, "afford") then
-                                print("🛑 Insufficient funds. Halted loop.")
                                 fundsExhausted = true
                                 break
                             end
@@ -1344,9 +1329,9 @@ automationCategory("Toggle Auto-Upgrade", function(button, stroke)
 end)
 
 settingsAddButton("Cycle UI Theme", function(button, stroke)
-    currentThemeIndex = currentThemeIndex + 1
-    if currentThemeIndex > #themes then
-        currentThemeIndex = 1
+    Config.UI.ThemeIndex += 1
+    if Config.UI.ThemeIndex > #themes then
+        Config.UI.ThemeIndex = 1
     end
     applyTheme()
     setButtonState(button, stroke, true)
@@ -1357,9 +1342,9 @@ local function cleanup()
     toggles.speedBoost = false
     toggles.infiniteJump = false
     toggles.autoBatToggled = false
-    toggles.speedBypassCFrame = false
     toggles.instantProximity = false
     toggles.multiPrompt = false
+    toggles.speedBypassCFrame = false
     toggles.antiAFK = false
     toggles.autoCollect = false
     isAutoUpgrading = false
@@ -1369,24 +1354,22 @@ local function cleanup()
     Config.ESP.PlayerBases = false
     Config.Hitbox.Enabled = false
 
-    for _, conn in pairs(Runtime.connections) do
-        if conn then
-            pcall(function() conn:Disconnect() end)
-        end
+    for _, connection in pairs(State.connections) do
+        safeDisconnect(connection)
     end
-    table.clear(Runtime.connections)
+    table.clear(State.connections)
 
     stopBatAimbot()
     StopPlayerBaseTracking()
 
-    if Runtime.loops.autoCollect then
-        task.cancel(Runtime.loops.autoCollect)
-        Runtime.loops.autoCollect = nil
+    if State.loops.autoCollect then
+        task.cancel(State.loops.autoCollect)
+        State.loops.autoCollect = nil
     end
 
-    if Runtime.loops.multiPrompt then
-        task.cancel(Runtime.loops.multiPrompt)
-        Runtime.loops.multiPrompt = nil
+    if State.loops.multiPrompt then
+        task.cancel(State.loops.multiPrompt)
+        State.loops.multiPrompt = nil
     end
 
     if physicsVelocityConstraint then
@@ -1403,27 +1386,21 @@ local function cleanup()
         hum.WalkSpeed = 16
     end
 
-    for playerObj in pairs(Runtime.playerESPObjects) do
-        RemovePlayerESP(playerObj)
+    for playerTarget in pairs(State.playerESPObjects) do
+        RemovePlayerESP(playerTarget)
     end
 
-    for _, conn in pairs(Runtime.playerConnections) do
-        if conn then
-            conn:Disconnect()
-        end
+    for _, conn in pairs(State.playerConnections) do
+        safeDisconnect(conn)
     end
+    table.clear(State.playerConnections)
 
-    if Runtime.connections.instantPrompt then
-        Runtime.connections.instantPrompt:Disconnect()
-        Runtime.connections.instantPrompt = nil
-    end
-
-    for prompt, dur in pairs(Runtime.originalHoldDurations) do
+    for prompt, duration in pairs(State.originalHoldDurations) do
         if prompt and prompt.Parent then
-            prompt.HoldDuration = dur
+            prompt.HoldDuration = duration
         end
     end
-    table.clear(Runtime.originalHoldDurations)
+    table.clear(State.originalHoldDurations)
 end
 
 closeButton.MouseButton1Click:Connect(function()
